@@ -80,6 +80,7 @@ starlette==1.0.0
 sympy==1.14.0
 tensorflow==2.21.0
 termcolor==3.3.0
+tf_keras==2.21.0
 tqdm==4.67.3
 typing-inspection==0.4.2
 typing_extensions==4.15.0
