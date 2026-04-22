@@ -1,0 +1,1289 @@
+🚀 PRESENCE SYSTEM - FULL CODE EXPORT
+====================================================================================================
+
+
+====================================================================================================
+📄 FILE: app\main.py
+====================================================================================================
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse  # <-- 1. IMPORT THIS
+
+from app.api.presence import router as presence_router
+from app.core.config import get_settings
+from app.core.database import create_db_and_tables
+
+settings = get_settings()
+
+app = FastAPI(title=settings.app_name)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def on_startup():
+    create_db_and_tables()
+
+# --- 2. UPDATE THIS ROUTE ---
+@app.get("/")
+def root():
+    # This tells FastAPI to serve your index.html file when you visit the base URL!
+    return FileResponse("index.html")
+
+app.include_router(presence_router)
+
+########################################
+# 📦 MODULE: app/core
+########################################
+
+
+====================================================================================================
+📄 FILE: app\core\__init__.py
+====================================================================================================
+
+
+
+====================================================================================================
+📄 FILE: app\core\config.py
+====================================================================================================
+
+from enum import Enum
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class PresenceMode(str, Enum):
+    CHECKIN_ONLY = "checkin_only"
+    CHECKIN_CHECKOUT = "checkin_checkout"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    app_name: str = "Flexible Presence API"
+    database_url: str = "sqlite:///./presence.db"
+    secret_key: str = "change-me"
+
+    qr_token_ttl_seconds: int = 10
+
+    face_auto_accept_threshold: float = 0.85
+    face_qr_fallback_threshold: float = 0.60
+
+    default_presence_mode: PresenceMode = PresenceMode.CHECKIN_ONLY
+
+    # Real Face Provider Settings
+    faces_dir: str = "./faces"
+    liveness_threshold: float = 0.35
+
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "noreply@example.com"
+
+    camera_id: str = "usb-cam-1"
+
+    # Mock face provider settings for first test
+    mock_face_mode: str = "always_qr"  # always_accept | always_qr | always_unknown
+    mock_face_candidate_user_id: str = "EMP001"
+
+    # If SMTP is not configured, QR PNGs are saved locally for testing
+    debug_save_email_to_disk: bool = True
+    debug_outbox_dir: str = "./debug_outbox"
+
+    enable_test_endpoints: bool = True
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+====================================================================================================
+📄 FILE: app\core\database.py
+====================================================================================================
+
+from sqlmodel import SQLModel, Session, create_engine
+
+from app.core.config import get_settings
+
+settings = get_settings()
+
+connect_args = {}
+if settings.database_url.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
+
+engine = create_engine(settings.database_url, echo=False, connect_args=connect_args)
+
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+
+########################################
+# 📦 MODULE: app/models
+########################################
+
+
+====================================================================================================
+📄 FILE: app\models\__init__.py
+====================================================================================================
+
+
+
+====================================================================================================
+📄 FILE: app\models\entities.py
+====================================================================================================
+
+from datetime import datetime, date
+from typing import Optional
+
+from sqlmodel import SQLModel, Field
+
+
+class User(SQLModel, table=True):
+    id: str = Field(primary_key=True)
+    full_name: str
+    email: str = Field(index=True)
+    user_type: str = Field(index=True)  # student | employee
+    department_or_filiere: Optional[str] = None
+    active: bool = True
+
+    # placeholder for future real model integration
+    face_template_ref: Optional[str] = None
+
+
+class PresencePolicy(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    context_id: str = Field(index=True)   # class session or work site/department
+    mode: str = Field(index=True)         # checkin_only | checkin_checkout
+    active: bool = True
+
+
+class PresenceRecord(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    user_id: str = Field(index=True)
+    context_id: str = Field(index=True)
+    mode: str = Field(index=True)
+
+    presence_date: date = Field(default_factory=lambda: datetime.utcnow().date(), index=True)
+
+    checkin_at: Optional[datetime] = None
+    checkout_at: Optional[datetime] = None
+    duration_seconds: Optional[int] = None
+
+    source: str = Field(index=True)  # face | qr_email_fallback
+    confidence: Optional[float] = None
+    camera_id: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class VerificationChallenge(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    jti: str = Field(index=True)
+    user_id: str = Field(index=True)
+    context_id: str = Field(index=True)
+
+    token_hash: str = Field(index=True)
+    status: str = Field(index=True, default="pending")  # pending | used | expired | cancelled
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime
+    used_at: Optional[datetime] = None
+
+
+########################################
+# 📦 MODULE: app/schemas
+########################################
+
+
+====================================================================================================
+📄 FILE: app\schemas\__init__.py
+====================================================================================================
+
+
+
+====================================================================================================
+📄 FILE: app\schemas\presence.py
+====================================================================================================
+
+from pydantic import BaseModel, EmailStr
+
+from app.core.config import PresenceMode
+
+
+class UserCreate(BaseModel):
+    id: str
+    full_name: str
+    email: EmailStr
+    user_type: str
+    department_or_filiere: str | None = None
+    active: bool = True
+
+
+class PolicyUpsert(BaseModel):
+    context_id: str
+    mode: PresenceMode
+    active: bool = True
+
+
+class TestQrRequest(BaseModel):
+    user_id: str
+    context_id: str
+
+
+########################################
+# 📦 MODULE: app/services
+########################################
+
+
+====================================================================================================
+📄 FILE: app\services\__init__.py
+====================================================================================================
+
+
+
+====================================================================================================
+📄 FILE: app\services\email_service.py
+====================================================================================================
+
+import os
+import re
+import base64
+from datetime import datetime
+import requests
+
+from app.core.config import get_settings
+
+settings = get_settings()
+
+def email_delivery_mode() -> str:
+    # If we have an API key, use the API mode
+    if settings.smtp_password and settings.smtp_password.startswith("xkeysib"):
+        return "api"
+    return "debug_outbox"
+
+def _safe_filename(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", value).strip("_")
+
+# FastAPI runs this in the background, keeping your camera lightning fast!
+def send_qr_email(to_email: str, full_name: str, qr_png: bytes, context_id: str, expires_at_iso: str) -> None:
+    delivery_mode = email_delivery_mode()
+
+    if delivery_mode == "debug_outbox":
+        os.makedirs(settings.debug_outbox_dir, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        base = f"{timestamp}_{_safe_filename(full_name)}_{_safe_filename(context_id)}"
+        png_path = os.path.join(settings.debug_outbox_dir, f"{base}.png")
+        
+        with open(png_path, "wb") as f:
+            f.write(qr_png)
+        print(f"[DEBUG OUTBOX] QR saved locally to {png_path}")
+        return
+
+    # --- THE NEW API APPROACH ---
+    api_key = settings.smtp_password
+    url = "https://api.brevo.com/v3/smtp/email"
+
+    # We must convert the raw image bytes into Base64 so it can be sent via JSON
+    b64_qr = base64.b64encode(qr_png).decode("utf-8")
+
+    payload = {
+        "sender": {"name": "Presence System", "email": settings.smtp_from},
+        "to": [{"email": to_email, "name": full_name}],
+        "subject": "Your Verification QR Code",
+        "htmlContent": f"<h3>Hello {full_name},</h3><p>Your verification QR code is attached.</p><p>It expires at <b>{expires_at_iso} UTC</b> and can be used only once.</p><p>Context: {context_id}</p>",
+        "attachment": [
+            {
+                "content": b64_qr,
+                "name": "verification_qr.png"
+            }
+        ]
+    }
+
+    headers = {
+        "accept": "application/json",
+        "api-key": api_key,
+        "content-type": "application/json"
+    }
+
+    try:
+        # Send the API request
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response.raise_for_status() 
+        print(f"✅ [API EMAIL SUCCESS] QR sent straight to {to_email} inbox!")
+    except Exception as e:
+        print(f"❌ [API EMAIL ERROR] Failed to send: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Error Details: {e.response.text}")
+
+====================================================================================================
+📄 FILE: app\services\face_adapter_stub.py
+====================================================================================================
+
+# app/services/face_adapter_stub.py
+from app.services.face_provider import FaceDecision
+
+
+class FaceAdapterStub:
+    def identify(self, image_bytes: bytes) -> FaceDecision:
+        # Replace this later with your teammates' model call
+        return FaceDecision(
+            matched=False,
+            candidate_user_id=None,
+            confidence=0.0,
+            reason="face model not integrated yet"
+        )
+
+
+====================================================================================================
+📄 FILE: app\services\face_provider.py
+====================================================================================================
+
+from typing import Optional, Protocol
+from pydantic import BaseModel
+
+
+class FaceDecision(BaseModel):
+    matched: bool
+    candidate_user_id: Optional[str] = None
+    confidence: float = 0.0
+    reason: str = ""
+
+
+class FaceProvider(Protocol):
+    def identify(self, image_bytes: bytes) -> FaceDecision:
+        pass
+
+
+====================================================================================================
+📄 FILE: app\services\mock_face_provider.py
+====================================================================================================
+
+from app.core.config import get_settings
+from app.services.face_provider import FaceDecision
+
+settings = get_settings()
+
+
+class MockFaceProvider:
+    """
+    First-test provider:
+    - always_accept  -> directly marks presence
+    - always_qr      -> low confidence, sends QR challenge email
+    - always_unknown -> reject
+    """
+
+    def identify(self, image_bytes: bytes) -> FaceDecision:
+        mode = settings.mock_face_mode.strip().lower()
+        candidate = settings.mock_face_candidate_user_id
+
+        if mode == "always_accept":
+            return FaceDecision(
+                matched=True,
+                candidate_user_id=candidate,
+                confidence=0.95,
+                reason="mock auto accept"
+            )
+
+        if mode == "always_qr":
+            return FaceDecision(
+                matched=False,
+                candidate_user_id=candidate,
+                confidence=0.70,
+                reason="mock low confidence, use qr fallback"
+            )
+
+        return FaceDecision(
+            matched=False,
+            candidate_user_id=None,
+            confidence=0.20,
+            reason="mock unknown face"
+        )
+
+
+====================================================================================================
+📄 FILE: app\services\presence_service.py
+====================================================================================================
+
+from datetime import datetime
+
+from sqlmodel import Session, select
+
+from app.core.config import PresenceMode
+from app.models.entities import PresenceRecord
+
+
+def record_presence(
+    session: Session,
+    user_id: str,
+    context_id: str,
+    mode: PresenceMode,
+    source: str,
+    confidence: float | None,
+    camera_id: str,
+):
+    now = datetime.utcnow()
+    today = now.date()
+
+    latest_today = session.exec(
+        select(PresenceRecord).where(
+            PresenceRecord.user_id == user_id,
+            PresenceRecord.context_id == context_id,
+            PresenceRecord.presence_date == today,
+        )
+    ).all()
+
+    latest_record = latest_today[-1] if latest_today else None
+
+    if mode == PresenceMode.CHECKIN_ONLY:
+        if latest_record:
+            raise ValueError("Presence already marked for this user/context today")
+
+        rec = PresenceRecord(
+            user_id=user_id,
+            context_id=context_id,
+            mode=mode.value,
+            presence_date=today,
+            checkin_at=now,
+            source=source,
+            confidence=confidence,
+            camera_id=camera_id,
+            notes="present",
+        )
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        return {
+            "action": "present",
+            "record_id": rec.id,
+            "checkin_at": rec.checkin_at,
+            "checkout_at": rec.checkout_at,
+            "duration_seconds": rec.duration_seconds,
+        }
+
+    COOLDOWN_SECONDS = 60 
+
+    # 1. No records today? Start the first Check-In.
+    if latest_record is None:
+        rec = PresenceRecord(
+            user_id=user_id,
+            context_id=context_id,
+            mode=mode.value,
+            presence_date=today,
+            checkin_at=now,
+            source=source,
+            confidence=confidence,
+            camera_id=camera_id,
+            notes="checkin",
+        )
+        session.add(rec)
+        session.commit()
+        session.refresh(rec)
+        return {
+            "action": "checkin",
+            "record_id": rec.id,
+            "checkin_at": rec.checkin_at,
+            "checkout_at": rec.checkout_at,
+            "duration_seconds": rec.duration_seconds,
+        }
+
+    # 2. Are they currently checked in? Do a Check-Out.
+    if latest_record.checkout_at is None:
+        # THE FIX: Prevent impossibly short shifts!
+        time_since_checkin = (now - latest_record.checkin_at).total_seconds()
+        if time_since_checkin < COOLDOWN_SECONDS:
+            raise ValueError(f"Scan ignored. You just checked in! Wait {int(COOLDOWN_SECONDS - time_since_checkin)}s.")
+
+        latest_record.checkout_at = now
+        latest_record.duration_seconds = int(time_since_checkin)
+        latest_record.notes = "checkout"
+        if confidence is not None:
+            latest_record.confidence = confidence
+        latest_record.camera_id = camera_id
+
+        session.add(latest_record)
+        session.commit()
+        session.refresh(latest_record)
+
+        return {
+            "action": "checkout",
+            "record_id": latest_record.id,
+            "checkin_at": latest_record.checkin_at,
+            "checkout_at": latest_record.checkout_at,
+            "duration_seconds": latest_record.duration_seconds,
+        }
+
+    # 3. IF WE REACH THIS POINT: They already checked out earlier. 
+    # THE FIX: Prevent them from instantly re-checking in right after checking out!
+    time_since_checkout = (now - latest_record.checkout_at).total_seconds()
+    if time_since_checkout < COOLDOWN_SECONDS:
+         raise ValueError(f"Scan ignored. You just checked out! Wait {int(COOLDOWN_SECONDS - time_since_checkout)}s.")
+
+    # They are coming back from lunch or a break! Start a NEW shift.
+    new_rec = PresenceRecord(
+        user_id=user_id,
+        context_id=context_id,
+        mode=mode.value,
+        presence_date=today,
+        checkin_at=now,
+        source=source,
+        confidence=confidence,
+        camera_id=camera_id,
+        notes="return_checkin",
+    )
+    session.add(new_rec)
+    session.commit()
+    session.refresh(new_rec)
+
+    return {
+        "action": "checkin",
+        "record_id": new_rec.id,
+        "checkin_at": new_rec.checkin_at,
+        "checkout_at": new_rec.checkout_at,
+        "duration_seconds": new_rec.duration_seconds,
+    }
+
+====================================================================================================
+📄 FILE: app\services\qr_challenge_service.py
+====================================================================================================
+
+import hashlib
+import io
+import time
+import uuid
+from datetime import datetime, timedelta
+
+import jwt
+import qrcode
+
+from app.core.config import get_settings
+
+settings = get_settings()
+
+def build_qr_token(user_id: str, context_id: str) -> tuple[str, str, datetime, str]:
+    now = datetime.utcnow()
+    exp = now + timedelta(seconds=settings.qr_token_ttl_seconds)
+    jti = str(uuid.uuid4())
+
+    # THE FIX: We use a strict Unix timestamp so timezones can't mess it up!
+    exp_timestamp = int(time.time()) + settings.qr_token_ttl_seconds
+
+    payload = {
+        "sub": user_id,
+        "context_id": context_id,
+        "purpose": "presence_qr_fallback",
+        "jti": jti,
+        "exp": exp_timestamp,  # Using the safe timestamp here
+    }
+
+    token = jwt.encode(payload, settings.secret_key, algorithm="HS256")
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token, token_hash, exp, jti
+
+def verify_qr_token(token: str) -> dict:
+    return jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+
+def render_qr_png(token: str) -> bytes:
+    qr = qrcode.QRCode(box_size=8, border=2)
+    qr.add_data(token)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+def token_hash_of(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+====================================================================================================
+📄 FILE: app\services\real_face_provider.py
+====================================================================================================
+
+import os
+import cv2
+import pickle
+import numpy as np
+from deepface import DeepFace
+
+from app.core.config import get_settings
+from app.services.face_provider import FaceDecision
+
+settings = get_settings()
+
+# Helper function to calculate math distance between two faces instantly
+def cosine_distance(a, b):
+    a = np.array(a)
+    b = np.array(b)
+    return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+class RealFaceProvider:
+    def __init__(self):
+        self.face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        
+        # Load the pre-calculated math into RAM!
+        self.db_file = "./face_embeddings.pkl"
+        self.face_db = []
+        
+        if os.path.exists(self.db_file):
+            with open(self.db_file, "rb") as f:
+                self.face_db = pickle.load(f)
+            print(f"[AI ENGINE] Loaded {len(self.face_db)} face embeddings into memory! ⚡")
+        else:
+            print("[AI WARNING] face_embeddings.pkl not found! Run build_embeddings.py first.")
+
+    def check_liveness(self, face_bgr) -> tuple[bool, float]:
+        """Anti-Spoofing logic"""
+        if face_bgr is None or face_bgr.size == 0:
+            return False, 0.0
+            
+        face = cv2.resize(face_bgr, (100, 100))
+        gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+        
+        s1 = min(cv2.Laplacian(gray, cv2.CV_64F).var() / 200.0, 1.0)
+        gx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        s2 = min(np.var(np.sqrt(gx**2 + gy**2)) / 500.0, 1.0)
+        
+        fft = np.fft.fftshift(np.fft.fft2(gray))
+        mag = np.abs(fft)
+        h, w = mag.shape
+        mask = np.zeros((h, w), dtype=bool)
+        mask[h//4:3*h//4, w//4:3*w//4] = True
+        s3 = 1.0 - min(mag[~mask].mean() / 15.0, 1.0)
+        
+        hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
+        s4 = 1.0 - min(np.sum(hsv[:,:,2] > 220) / hsv[:,:,2].size / 0.25, 1.0)
+        
+        sat = hsv[:,:,1]
+        sl = np.std([np.mean(sat[:50,:50]), np.mean(sat[:50,50:]),
+                     np.mean(sat[50:,:50]), np.mean(sat[50:,50:])])
+        s5 = min((np.std(sat) + sl*2) / 50.0, 1.0)
+        
+        score = s1*0.30 + s2*0.20 + s3*0.25 + s4*0.15 + s5*0.10
+        return score >= settings.liveness_threshold, round(score, 3)
+
+    def identify(self, image_bytes: bytes) -> FaceDecision:
+        if not self.face_db:
+            return FaceDecision(matched=False, confidence=0.0, reason="Database is empty. Run build_embeddings.py")
+
+        # 1. Decode image & Extract Face
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+
+        if len(faces) == 0:
+            return FaceDecision(matched=False, confidence=0.0, reason="No face detected in frame")
+
+        faces = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)
+        x, y, w, h = faces[0]
+        face_bgr = frame[y:y+h, x:x+w]
+
+        # 2. Check Liveness
+        is_real, liveness_score = self.check_liveness(face_bgr)
+        if not is_real:
+            return FaceDecision(matched=False, confidence=0.10, reason="Spoof detected")
+
+        # 3. Convert Live Face into Numbers (Embeddings)
+        try:
+            live_result = DeepFace.represent(img_path=face_bgr, model_name="Facenet", enforce_detection=False)
+            live_embedding = live_result[0]["embedding"]
+        except Exception:
+            return FaceDecision(matched=False, confidence=0.0, reason="Failed to extract facial features")
+
+        # 4. INSTANT SEARCH: Compare live numbers to database numbers
+        best_candidate_name = None
+        lowest_distance = 1.0 
+
+        for item in self.face_db:
+            dist = cosine_distance(live_embedding, item["embedding"])
+            if dist < lowest_distance:
+                lowest_distance = dist
+                best_candidate_name = item["name"]
+
+        # 5. Convert Distance to Confidence
+        calculated_confidence = max(0.0, 1.0 - lowest_distance)
+        
+        return FaceDecision(
+            matched=False, 
+            candidate_user_id=best_candidate_name, 
+            confidence=round(calculated_confidence, 2), 
+            reason=f"Best guess: {best_candidate_name} (Dist: {round(lowest_distance, 2)})"
+        )
+
+########################################
+# 📦 MODULE: app/api
+########################################
+
+
+====================================================================================================
+📄 FILE: app\api\__init__.py
+====================================================================================================
+
+
+
+====================================================================================================
+📄 FILE: app\api\presence.py
+====================================================================================================
+
+from datetime import datetime
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from sqlmodel import Session, select
+
+from app.core.config import PresenceMode, get_settings
+from app.core.database import get_session
+from app.models.entities import PresencePolicy, PresenceRecord, User, VerificationChallenge
+from app.schemas.presence import PolicyUpsert, TestQrRequest, UserCreate
+from app.services.email_service import email_delivery_mode, send_qr_email
+from app.services.real_face_provider import RealFaceProvider
+from app.services.presence_service import record_presence
+from app.services.qr_challenge_service import (
+    build_qr_token,
+    render_qr_png,
+    token_hash_of,
+    verify_qr_token,
+)
+
+router = APIRouter(prefix="/presence", tags=["presence"])
+settings = get_settings()
+face_provider = RealFaceProvider()
+
+
+def resolve_mode(session: Session, context_id: str) -> PresenceMode:
+    policy = session.exec(
+        select(PresencePolicy).where(
+            PresencePolicy.context_id == context_id,
+            PresencePolicy.active == True,  # noqa: E712
+        )
+    ).first()
+
+    if policy:
+        return PresenceMode(policy.mode)
+
+    return settings.default_presence_mode
+
+
+def issue_qr_challenge(
+    *,
+    session: Session,
+    background_tasks: BackgroundTasks,
+    user: User,
+    context_id: str,
+):
+    pending = session.exec(
+        select(VerificationChallenge).where(
+            VerificationChallenge.user_id == user.id,
+            VerificationChallenge.context_id == context_id,
+            VerificationChallenge.status == "pending",
+        )
+    ).all()
+
+    for item in pending:
+        item.status = "cancelled"
+        session.add(item)
+
+    token, hashed_token, expires_at, jti = build_qr_token(user.id, context_id)
+
+    challenge = VerificationChallenge(
+        jti=jti,
+        user_id=user.id,
+        context_id=context_id,
+        token_hash=hashed_token,
+        status="pending",
+        expires_at=expires_at,
+    )
+    session.add(challenge)
+    session.commit()
+    session.refresh(challenge)
+
+    qr_png = render_qr_png(token)
+
+    background_tasks.add_task(
+        send_qr_email,
+        user.email,
+        user.full_name,
+        qr_png,
+        context_id,
+        expires_at.isoformat(),
+    )
+
+    return {
+        "expires_at": expires_at.isoformat(),
+        "delivery_mode": email_delivery_mode(),
+    }
+
+
+@router.get("/health")
+def health():
+    return {"ok": True, "service": settings.app_name}
+
+
+@router.post("/users")
+def create_user(payload: UserCreate, session: Session = Depends(get_session)):
+    existing = session.get(User, payload.id)
+    if existing:
+        raise HTTPException(status_code=400, detail="User ID already exists")
+
+    user = User(**payload.model_dump())
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+@router.put("/policies")
+def upsert_policy(payload: PolicyUpsert, session: Session = Depends(get_session)):
+    existing = session.exec(
+        select(PresencePolicy).where(PresencePolicy.context_id == payload.context_id)
+    ).first()
+
+    if existing:
+        existing.mode = payload.mode.value
+        existing.active = payload.active
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        return existing
+
+    policy = PresencePolicy(
+        context_id=payload.context_id,
+        mode=payload.mode.value,
+        active=payload.active,
+    )
+    session.add(policy)
+    session.commit()
+    session.refresh(policy)
+    return policy
+
+
+@router.get("/records")
+def list_records(
+    session: Session = Depends(get_session),
+    user_id: str | None = None,
+    context_id: str | None = None,
+):
+    statement = select(PresenceRecord)
+
+    if user_id:
+        statement = statement.where(PresenceRecord.user_id == user_id)
+    if context_id:
+        statement = statement.where(PresenceRecord.context_id == context_id)
+
+    return session.exec(statement).all()
+
+
+@router.post("/identify")
+async def identify_face(
+    background_tasks: BackgroundTasks,
+    context_id: str = Form(...),
+    camera_id: str = Form(default="usb-cam-1"),
+    image: UploadFile = File(...),
+    session: Session = Depends(get_session),
+):
+    image_bytes = await image.read()
+    decision = face_provider.identify(image_bytes)
+    mode = resolve_mode(session, context_id)
+
+    if decision.candidate_user_id is None:
+        raise HTTPException(status_code=401, detail="Face not recognized")
+
+    # First try finding by ID
+    user = session.get(User, decision.candidate_user_id)
+
+    # If that fails, search by their Full Name (which matches your folder name)
+    if not user:
+        user = session.exec(select(User).where(User.full_name == decision.candidate_user_id)).first()
+
+    if not user or not user.active:
+        raise HTTPException(status_code=404, detail=f"User '{decision.candidate_user_id}' not found in database")
+
+    if decision.confidence >= settings.face_auto_accept_threshold:
+        try:
+            result = record_presence(
+                session=session,
+                user_id=user.id,
+                context_id=context_id,
+                mode=mode,
+                source="face",
+                confidence=decision.confidence,
+                camera_id=camera_id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        return {
+            "ok": True,
+            "verification": "face_accepted",
+            "user_id": user.id,
+            "full_name": user.full_name,
+            "confidence": decision.confidence,
+            "reason": decision.reason,
+            **result,
+        }
+
+    if decision.confidence >= settings.face_qr_fallback_threshold:
+        # We NO LONGER send the email here! We just ask for confirmation.
+        return {
+            "ok": True,
+            "verification": "needs_confirmation",  # <-- New State!
+            "user_id": user.id,
+            "full_name": user.full_name,
+            "confidence": decision.confidence,
+            "reason": "Needs manual confirmation before sending email",
+        }
+
+    raise HTTPException(status_code=401, detail="Face confidence too low")
+
+
+@router.post("/send-fallback-email")
+def trigger_fallback_email(
+    background_tasks: BackgroundTasks,
+    user_id: str = Form(...),
+    context_id: str = Form(...),
+    session: Session = Depends(get_session)
+):
+    user = session.get(User, user_id)
+    if not user or not user.active:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Now we actually generate the token and send the email!
+    qr_info = issue_qr_challenge(
+        session=session,
+        background_tasks=background_tasks,
+        user=user,
+        context_id=context_id,
+    )
+    
+    return {
+        "ok": True,
+        "verification": "qr_sent",
+        "user_id": user.id,
+        "full_name": user.full_name,
+        **qr_info,
+    }
+
+@router.post("/verify-qr")
+def verify_qr(
+    qr_raw: str = Form(...),
+    camera_id: str = Form(default="usb-cam-1"),
+    session: Session = Depends(get_session),
+):
+    import jwt  # Import here just in case
+
+    # Clean up the raw string in case the camera added weird spaces
+    clean_qr = qr_raw.strip()
+    
+    try:
+        payload = verify_qr_token(clean_qr)
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=400, detail="EXPIRED! You scanned an old email.")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"INVALID! The camera misread the QR: {e}")
+
+    hashed_token = token_hash_of(clean_qr)
+
+    challenge = session.exec(
+        select(VerificationChallenge).where(
+            VerificationChallenge.token_hash == hashed_token,
+            VerificationChallenge.status == "pending",
+        )
+    ).first()
+
+    if not challenge:
+        raise HTTPException(status_code=400, detail="Challenge not found or already used")
+
+    if challenge.expires_at < datetime.utcnow():
+        challenge.status = "expired"
+        session.add(challenge)
+        session.commit()
+        raise HTTPException(status_code=400, detail="QR challenge expired in database")
+
+    if payload.get("sub") != challenge.user_id or payload.get("context_id") != challenge.context_id:
+        raise HTTPException(status_code=400, detail="QR token does not match challenge")
+
+    challenge.status = "used"
+    challenge.used_at = datetime.utcnow()
+    session.add(challenge)
+    session.commit()
+
+    mode = resolve_mode(session, challenge.context_id)
+    user = session.get(User, challenge.user_id)
+
+    try:
+        result = record_presence(
+            session=session,
+            user_id=challenge.user_id,
+            context_id=challenge.context_id,
+            mode=mode,
+            source="qr_email_fallback",
+            confidence=None,
+            camera_id=camera_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "ok": True,
+        "verification": "qr_accepted",
+        "user_id": user.id,
+        "full_name": user.full_name,
+        **result,
+    }
+
+
+@router.post("/test/request-qr")
+def request_test_qr(
+    payload: TestQrRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    if not settings.enable_test_endpoints:
+        raise HTTPException(status_code=404, detail="Test endpoints are disabled")
+
+    user = session.get(User, payload.user_id)
+    if not user or not user.active:
+        raise HTTPException(status_code=404, detail="User not found or inactive")
+
+    qr_info = issue_qr_challenge(
+        session=session,
+        background_tasks=background_tasks,
+        user=user,
+        context_id=payload.context_id,
+    )
+
+    return {
+        "ok": True,
+        "message": "Test QR generated",
+        "user_id": user.id,
+        "full_name": user.full_name,
+        **qr_info,
+    }
+
+
+########################################
+# 📁 ROOT FILES
+########################################
+
+
+====================================================================================================
+📄 FILE: requirements.txt
+====================================================================================================
+
+absl-py==2.4.0
+aiosmtplib==5.1.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+astunparse==1.6.3
+beautifulsoup4==4.14.3
+blinker==1.9.0
+certifi==2026.2.25
+charset-normalizer==3.4.7
+click==8.3.2
+colorama==0.4.6
+customtkinter==5.2.2
+darkdetect==0.8.0
+deepface==0.0.99
+dnspython==2.8.0
+email-validator==2.3.0
+et_xmlfile==2.0.0
+fastapi==0.136.0
+filelock==3.29.0
+fire==0.7.1
+Flask==3.1.3
+flask-cors==6.0.2
+flatbuffers==25.12.19
+gast==0.7.0
+gdown==6.0.0
+google-pasta==0.2.0
+greenlet==3.4.0
+grpcio==1.80.0
+gunicorn==25.3.0
+h11==0.16.0
+h5py==3.14.0
+httptools==0.7.1
+idna==3.11
+itsdangerous==2.2.0
+Jinja2==3.1.6
+joblib==1.5.3
+keras==3.14.0
+libclang==18.1.1
+lightdsa==0.0.3
+lightecc==0.0.6
+lightphe==0.0.24
+lz4==4.4.5
+markdown-it-py==4.0.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+ml_dtypes==0.5.4
+mpmath==1.3.0
+mtcnn==1.0.0
+namex==0.1.0
+numpy==2.4.4
+opencv-python==4.13.0.92
+openpyxl==3.1.5
+opt_einsum==3.4.0
+optree==0.19.0
+packaging==26.1
+pandas==3.0.2
+pillow==12.2.0
+protobuf==7.34.1
+pydantic==2.13.2
+pydantic-settings==2.13.1
+pydantic_core==2.46.2
+Pygments==2.20.0
+PyJWT==2.12.1
+PySocks==1.7.1
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.2
+python-multipart==0.0.26
+PyYAML==6.0.3
+qrcode==8.2
+requests==2.33.1
+retina-face==0.0.17
+rich==15.0.0
+setuptools==82.0.1
+six==1.17.0
+soupsieve==2.8.3
+SQLAlchemy==2.0.49
+sqlmodel==0.0.38
+starlette==1.0.0
+sympy==1.14.0
+tensorflow==2.21.0
+termcolor==3.3.0
+tf_keras==2.21.0
+tqdm==4.67.3
+typing-inspection==0.4.2
+typing_extensions==4.15.0
+tzdata==2026.1
+urllib3==2.6.3
+uvicorn==0.44.0
+watchfiles==1.1.1
+websockets==16.0
+Werkzeug==3.1.8
+wheel==0.46.3
+wrapt==2.1.2
+
+
+====================================================================================================
+📄 FILE: seed.py
+====================================================================================================
+
+from sqlmodel import Session, select
+
+from app.core.database import create_db_and_tables, engine
+from app.models.entities import PresencePolicy, User
+
+def upsert_user(session: Session, user: User):
+    existing = session.get(User, user.id)
+    if existing:
+        existing.full_name = user.full_name
+        existing.email = user.email
+        existing.user_type = user.user_type
+        existing.department_or_filiere = user.department_or_filiere
+        existing.active = user.active
+        session.add(existing)
+    else:
+        session.add(user)
+
+def upsert_policy(session: Session, context_id: str, mode: str):
+    existing = session.exec(
+        select(PresencePolicy).where(PresencePolicy.context_id == context_id)
+    ).first()
+
+    if existing:
+        existing.mode = mode
+        existing.active = True
+        session.add(existing)
+    else:
+        session.add(PresencePolicy(context_id=context_id, mode=mode, active=True))
+
+def main():
+    # 1. Create the database tables if they don't exist
+    create_db_and_tables()
+
+    with Session(engine) as session:
+        # 2. Add your real team members! 
+        # (Make sure 'full_name' matches your folder names exactly)
+        upsert_user(
+            session,
+            User(
+                id="USR001",
+                full_name="ayoub",
+                email="ayoubmori33@gmail.com",  # Replace with real emails later
+                user_type="student",
+                department_or_filiere="GI",
+                active=True,
+            ),
+        )
+
+        upsert_user(
+            session,
+            User(
+                id="USR002",
+                full_name="saida",
+                email="saida@example.com",
+                user_type="student",
+                department_or_filiere="GI",
+                active=True,
+            ),
+        )
+
+        upsert_user(
+            session,
+            User(
+                id="USR003",
+                full_name="hasna",
+                email="hasna@example.com",
+                user_type="student",
+                department_or_filiere="GI",
+                active=True,
+            ),
+        )
+
+        upsert_user(
+            session,
+            User(
+                id="USR004",
+                full_name="salma",
+                email="salma@example.com",
+                user_type="student",
+                department_or_filiere="GI",
+                active=True,
+            ),
+        )
+
+        # 3. Setup the rules for the scanning context
+        upsert_policy(session, "WORK-HQ", "checkin_checkout")
+
+        session.commit()
+
+    print("✅ Database Seed Completed Successfully!")
+    print("Registered Users: ayoub, saida, hasna, salma")
+    print("Active Contexts: WORK-HQ -> checkin_checkout")
+
+if __name__ == "__main__":
+    main()

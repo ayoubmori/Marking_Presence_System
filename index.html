@@ -16,6 +16,10 @@
             <button onclick="fetchRecords()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded shadow transition">
                 Refresh Data
             </button>
+            <button onclick="downloadCsv()" class="download-btn">
+                Download CSV
+            </button>
+
         </div>
 
         <div class="bg-white rounded-lg shadow overflow-hidden">
@@ -81,6 +85,12 @@
         // Refresh table every 5 seconds automatically
         fetchRecords();
         setInterval(fetchRecords, 5000); 
+
+        function downloadCsv() {
+            window.location.href = "/presence/export";
+        }
+
+
     </script>
 </body>
 </html>

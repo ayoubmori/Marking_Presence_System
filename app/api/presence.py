@@ -1,6 +1,9 @@
-from datetime import datetime
+import csv
+from datetime import date, datetime
+from io import StringIO
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
 from app.core.config import PresenceMode, get_settings
@@ -16,6 +19,7 @@ from app.services.qr_challenge_service import (
     token_hash_of,
     verify_qr_token,
 )
+
 
 router = APIRouter(prefix="/presence", tags=["presence"])
 settings = get_settings()
@@ -206,6 +210,87 @@ async def identify_face(
         }
 
     raise HTTPException(status_code=401, detail="Face confidence too low")
+
+
+@router.get("/export")
+def export_records_csv(
+    session: Session = Depends(get_session),
+    user_id: str | None = None,
+    context_id: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
+    statement = (
+        select(PresenceRecord, User)
+        .join(User, User.id == PresenceRecord.user_id)
+        .order_by(PresenceRecord.presence_date.desc(), PresenceRecord.checkin_at.desc())
+    )
+
+    if user_id:
+        statement = statement.where(PresenceRecord.user_id == user_id)
+
+    if context_id:
+        statement = statement.where(PresenceRecord.context_id == context_id)
+
+    if date_from:
+        statement = statement.where(PresenceRecord.presence_date >= date_from)
+
+    if date_to:
+        statement = statement.where(PresenceRecord.presence_date <= date_to)
+
+    rows = session.exec(statement).all()
+
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+
+    writer.writerow([
+        "record_id",
+        "user_id",
+        "full_name",
+        "email",
+        "user_type",
+        "department_or_filiere",
+        "context_id",
+        "mode",
+        "presence_date",
+        "checkin_at",
+        "checkout_at",
+        "duration_seconds",
+        "duration_hours",
+        "source",
+        "confidence",
+        "camera_id",
+        "notes",
+    ])
+
+    for record, user in rows:
+        writer.writerow([
+            record.id,
+            user.id,
+            user.full_name,
+            user.email,
+            user.user_type,
+            user.department_or_filiere or "",
+            record.context_id,
+            record.mode,
+            record.presence_date.isoformat() if record.presence_date else "",
+            record.checkin_at.isoformat() if record.checkin_at else "",
+            record.checkout_at.isoformat() if record.checkout_at else "",
+            record.duration_seconds if record.duration_seconds is not None else "",
+            round(record.duration_seconds / 3600, 2) if record.duration_seconds is not None else "",
+            record.source,
+            record.confidence if record.confidence is not None else "",
+            record.camera_id or "",
+            record.notes or "",
+        ])
+
+    filename = f'presence_export_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.csv'
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/send-fallback-email")
