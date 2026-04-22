@@ -26,15 +26,16 @@ if not exist "scripts\start_kiosk.bat" (
     exit /b 1
 )
 
-start "Presence Backend" cmd /k "%~dp0scripts\start_backend.bat"
+start "Presence Backend" cmd /k "scripts\start_backend.bat"
 
-timeout /t 4 /nobreak > nul
+:: Wait 22 seconds to let TensorFlow and Face Embeddings load fully
+timeout /t 22 /nobreak > nul
 
-start "Presence Kiosk" cmd /k "%~dp0scripts\start_kiosk.bat"
+start "Presence Kiosk" cmd /k "scripts\start_kiosk.bat"
 
-timeout /t 2 /nobreak > nul
+:: Wait 3 more seconds before opening the dashboard
+timeout /t 3 /nobreak > nul
 
 start "" "http://127.0.0.1:8000"
-
 echo Backend, kiosk, and dashboard launched.
 endlocal
